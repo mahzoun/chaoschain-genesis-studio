@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-ChaosChain SDK - BASE INSTALL DEMO
+ChaosChain SDK - ETHEREUM INSTALL DEMO
 ===================================
 
 What this demonstrates:
@@ -37,15 +37,16 @@ warnings.filterwarnings('ignore', message='.*encountered the following error dur
 console = Console()
 
 # Set minimal environment variables for demo
-# Using Base Sepolia for reliable RPC connectivity
-if "BASE_SEPOLIA_RPC_URL" not in os.environ:
-    os.environ["BASE_SEPOLIA_RPC_URL"] = "https://sepolia.base.org"
+# Using Ethereum Sepolia for reliable RPC connectivity
+if "SEPOLIA_RPC_URL" not in os.environ:
+    os.environ["SEPOLIA_RPC_URL"] = "https://ethereum-sepolia-rpc.publicnode.com"
+os.environ.setdefault("ETHEREUM_SEPOLIA_RPC_URL", os.environ["SEPOLIA_RPC_URL"])
 
 
 def print_header():
     """Print demo header."""
     header = Panel.fit(
-        "\n[bold cyan]CHAOSCHAIN SDK - BASE INSTALL DEMO[/bold cyan]\n\n"
+        "\n[bold cyan]CHAOSCHAIN SDK - ETHEREUM INSTALL DEMO[/bold cyan]\n\n"
         "[yellow]What works out-of-the-box:[/yellow]\n"
         "  ✅ ERC-8004 v1.0 (Identity, Validation & Reputation)\n"
         "  ✅ x402 Payment Protocol (Coinbase)\n"
@@ -53,7 +54,7 @@ def print_header():
         "  ✅ Process Integrity Verification\n"
         "  ✅ Wallet Management\n\n"
         "[dim]No external services required![/dim]\n",
-        title="🏆 Genesis Studio - Base SDK",
+        title="🏆 Genesis Studio - Ethereum SDK",
         border_style="cyan"
     )
     console.print(header)
@@ -73,22 +74,22 @@ def demo_1_wallet_creation():
         agent_name="DemoAgent",
         agent_domain="demo.chaoschain.io",
         agent_role=AgentRole.SERVER,
-        network=NetworkConfig.BASE_SEPOLIA,
+        network=NetworkConfig.ETHEREUM_SEPOLIA,
         enable_process_integrity=False,  # Keep it simple for demo 1
-        enable_ap2=False  # Disable AP2 for base demo
+        enable_ap2=False  # Disable AP2 for this demo
     )
     
     console.print(f"✅ Wallet created!")
     console.print(f"   Address: [green]{sdk.wallet_address}[/green]")
-    console.print(f"   Network: [cyan]Base Sepolia[/cyan]")
-    
+    console.print(f"   Network: [cyan]Ethereum Sepolia[/cyan]")
+
     # Show wallet info table
     table = Table(title="Wallet Details")
     table.add_column("Property", style="cyan")
     table.add_column("Value", style="green")
     table.add_row("Address", sdk.wallet_address)
-    table.add_row("Network", "Base Sepolia (Chain ID: 84532)")
-    
+    table.add_row("Network", "Ethereum Sepolia (Chain ID: 11155111)")
+
     # Get balance from wallet manager
     try:
         balance = sdk.wallet_manager.w3.eth.get_balance(sdk.wallet_address)
@@ -144,7 +145,7 @@ def demo_2_erc8004_identity(sdk):
             console.print(f"⚠️  Registration error: {e}")
         
         console.print("\n[bold]💰 To register on-chain:[/bold]")
-        console.print("   1. Get testnet ETH: [cyan]https://docs.base.org/base-chain/tools/network-faucets[/cyan]")
+        console.print("   1. Get testnet ETH: [cyan]https://sepoliafaucet.com/[/cyan]")
         console.print(f"   2. Send to: [green]{sdk.wallet_address}[/green]")
         console.print("   3. Run this demo again")
         return None
@@ -198,7 +199,7 @@ def demo_3_storage(sdk):
     test_data = {
         "message": "Hello from ChaosChain SDK!",
         "timestamp": datetime.now().isoformat(),
-        "demo": "base_install"
+        "demo": "ethereum_install"
     }
     
     try:
@@ -242,9 +243,9 @@ def demo_4_process_integrity():
         agent_name="IntegrityDemo",
         agent_domain="integrity.chaoschain.io",
         agent_role=AgentRole.SERVER,
-        network=NetworkConfig.BASE_SEPOLIA,
+        network=NetworkConfig.ETHEREUM_SEPOLIA,
         enable_process_integrity=True,  # Enable process integrity
-        enable_ap2=False  # Disable AP2 for base demo
+        enable_ap2=False  # Disable AP2 for this demo
     )
     
     console.print("✅ Process integrity verifier initialized!")
@@ -267,8 +268,8 @@ def demo_5_x402_payments():
         agent_name="PaymentDemo",
         agent_domain="payment.chaoschain.io",
         agent_role=AgentRole.SERVER,
-        network=NetworkConfig.BASE_SEPOLIA,
-        enable_ap2=False  # Disable AP2 for base demo
+        network=NetworkConfig.ETHEREUM_SEPOLIA,
+        enable_ap2=False  # Disable AP2 for this demo
     )
     
     console.print("✅ x402 Payment Manager initialized!")
@@ -299,9 +300,9 @@ def demo_5_x402_payments():
 def print_summary():
     """Print demo summary."""
     console.print("\n" + "=" * 80)
-    console.print("[bold green]🎉 Base Install Demo Complete![/bold green]\n")
+    console.print("[bold green]🎉 Ethereum Install Demo Complete![/bold green]\n")
     
-    summary_table = Table(title="What You Can Do with Base Install")
+    summary_table = Table(title="What You Can Do with Ethereum Install")
     summary_table.add_column("Feature", style="cyan")
     summary_table.add_column("Status", style="green")
     summary_table.add_column("Requirements")
@@ -335,7 +336,7 @@ def print_summary():
     console.print(summary_table)
     
     console.print("\n[bold]🚀 Next Steps:[/bold]")
-    console.print("  1. Get testnet tokens: [cyan]https://docs.base.org/base-chain/tools/network-faucets[/cyan]")
+    console.print("  1. Get testnet tokens: [cyan]https://sepoliafaucet.com/[/cyan]")
     console.print("  2. Install IPFS (optional): [cyan]https://docs.ipfs.tech/install/[/cyan]")
     console.print("  3. Explore optional integrations:")
     console.print("     • [yellow]0G Storage/Compute:[/yellow] pip install chaoschain-sdk[0g]")
@@ -347,7 +348,7 @@ def print_summary():
 
 
 def main():
-    """Run the base install demo."""
+    """Run the Ethereum install demo."""
     try:
         print_header()
         
@@ -384,4 +385,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
