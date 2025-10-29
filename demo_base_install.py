@@ -25,7 +25,6 @@ after installing the base SDK!
 import os
 import sys
 import time
-import threading
 import warnings
 from dataclasses import dataclass
 from datetime import datetime
@@ -34,20 +33,16 @@ from typing import List, Optional
 
 from rich.console import Console
 from rich.panel import Panel
-from rich.progress import (
-    BarColumn,
-    Progress,
-    SpinnerColumn,
-    TextColumn,
-    TimeElapsedColumn,
-)
 from rich.table import Table
+
+from demo_presenter import DemoNarrator, SectionContent, WaitBar
 
 # Suppress Web3.py event parsing warnings (harmless ABI mismatches)
 warnings.filterwarnings('ignore', message='.*MismatchedABI.*')
 warnings.filterwarnings('ignore', message='.*encountered the following error during processing.*')
 
 console = Console()
+presenter = DemoNarrator(console)
 
 
 @dataclass
@@ -68,62 +63,6 @@ class DemoStepResult:
 demo_results: List[DemoStepResult] = []
 
 REGISTER_AGENT = os.getenv("DEMO_REGISTER_AGENT", "false").strip().lower() == "true"
-
-
-class WaitBar:
-    """Display a pulsing progress bar while long-running work completes."""
-
-    def __init__(self, description: str):
-        self.description = description
-        self.elapsed: Optional[float] = None
-        self._stop_event = threading.Event()
-        self._thread: Optional[threading.Thread] = None
-        self._start: Optional[float] = None
-        self._progress: Optional[Progress] = None
-        self._task_id: Optional[int] = None
-
-    def __enter__(self):
-        self._progress = Progress(
-            SpinnerColumn(style="cyan"),
-            BarColumn(bar_width=None, style="cyan"),
-            TimeElapsedColumn(),
-            TextColumn("[progress.description]{task.description}", style="white")
-        )
-
-        def runner():
-            with self._progress:
-                self._task_id = self._progress.add_task(self.description, total=100)
-                progress_value = 0
-                while not self._stop_event.is_set():
-                    if self._task_id is not None:
-                        progress_value = (progress_value + 2) % 100
-                        self._progress.update(self._task_id, completed=progress_value)
-                    time.sleep(0.1)
-
-        self._thread = threading.Thread(target=runner, daemon=True)
-        self._thread.start()
-        self._start = time.perf_counter()
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        if self._start is None:
-            self.elapsed = 0.0
-        else:
-            self.elapsed = time.perf_counter() - self._start
-        self._stop_event.set()
-        if self._thread is not None:
-            self._thread.join()
-        if self._progress and self._task_id is not None:
-            try:
-                self._progress.update(self._task_id, completed=100)
-            except Exception:
-                pass
-
-        if exc_type is None:
-            console.print(f"[green]✅ {self.description} completed in {self.elapsed:.2f}s[/green]")
-        else:
-            console.print(f"[red]❌ {self.description} failed after {self.elapsed:.2f}s[/red]")
-        return False
 
 
 def record_result(
@@ -227,14 +166,9 @@ def print_header():
 
 def demo_1_wallet_creation():
     """Demo 1: Create and manage wallets."""
-    console.print("\n[bold]📋 Demo 1: Wallet Creation & Management[/bold]")
-    console.print("=" * 80)
-    
     from chaoschain_sdk import ChaosChainAgentSDK, NetworkConfig
     from chaoschain_sdk.types import AgentRole
-    
-    # Create SDK instance (auto-creates wallet)
-    console.print("🔧 Creating ChaosChain Agent SDK...")
+
     start_time = time.perf_counter()
     sdk = ChaosChainAgentSDK(
         agent_name="DemoAgent",
@@ -245,27 +179,29 @@ def demo_1_wallet_creation():
         enable_ap2=False  # Disable AP2 for this demo
     )
     creation_latency = time.perf_counter() - start_time
-    
-    console.print(f"✅ Wallet created!")
-    console.print(f"   Address: [green]{sdk.wallet_address}[/green]")
-    console.print(f"   Network: [cyan]Ethereum Sepolia[/cyan]")
-    # Show wallet info table
-    table = Table(title="Wallet Details")
-    table.add_column("Property", style="cyan")
-    table.add_column("Value", style="green")
-    table.add_row("Address", sdk.wallet_address)
-    table.add_row("Network", "Ethereum Sepolia (Chain ID: 11155111)")
 
-    # Get balance from wallet manager
     try:
         balance = sdk.wallet_manager.w3.eth.get_balance(sdk.wallet_address)
         balance_eth = sdk.wallet_manager.w3.from_wei(balance, 'ether')
-        table.add_row("Balance", f"{balance_eth:.4f} ETH")
+        balance_text = f"{balance_eth:.4f} ETH"
     except Exception as e:
-        table.add_row("Balance", f"Unable to fetch ({e})")
-    
-    console.print(table)
-    
+        balance_text = f"[yellow]Unavailable ({e})[/yellow]"
+
+    presenter.section(
+        "Wallet Creation & Management",
+        description="Bootstrap an on-chain agent identity ready for Genesis Studio flows.",
+        bullets=[
+            "ChaosChain Agent SDK generated keys, RPC connectivity, and local persistence.",
+        ],
+        highlights=[
+            SectionContent("Agent", sdk.agent_name),
+            SectionContent("Wallet", f"[green]{sdk.wallet_address}[/green]"),
+            SectionContent("Network", "[cyan]Ethereum Sepolia[/cyan]"),
+            SectionContent("Setup Time", f"{creation_latency:.2f}s"),
+            SectionContent("Balance", balance_text),
+        ],
+    )
+
     record_result(
         "Wallet Creation",
         "Success",
@@ -280,21 +216,15 @@ def demo_1_wallet_creation():
 
 def demo_2_erc8004_identity(sdk):
     """Demo 2: ERC-8004 identity registration."""
-    console.print("\n[bold]📋 Demo 2: ERC-8004 Identity Registration[/bold]")
-    console.print("=" * 80)
-    
-    from chaoschain_sdk.types import AgentRole
-    
-    console.print("🔧 Registering agent on ERC-8004 IdentityRegistry...")
-    
+    description = (
+        "Register the agent on the ERC-8004 identity registry so downstream services can verify it."
+    )
     existing_agent_id = None
+
     try:
-        with WaitBar("Checking existing registration") as wait_check:
+        with WaitBar(console, "Checking existing registration") as wait_check:
             existing_agent_id = sdk.chaos_agent.get_agent_id()
         if existing_agent_id:
-            console.print("✅ Agent already registered on-chain!")
-            console.print(f"   Agent ID: [green]{existing_agent_id}[/green]")
-            console.print(f"   Wallet: [cyan]{sdk.wallet_address}[/cyan]")
             record_result(
                 "Agent Registration",
                 "Using existing",
@@ -303,26 +233,36 @@ def demo_2_erc8004_identity(sdk):
                 agent_name=sdk.agent_name,
                 agent_wallet=sdk.wallet_address
             )
+            presenter.section(
+                "ERC-8004 Identity",
+                description=description,
+                bullets=["Agent record already lives on Sepolia — no transaction required."],
+                highlights=[
+                    SectionContent("Status", "[cyan]Already registered[/cyan]"),
+                    SectionContent("Agent ID", f"[green]{existing_agent_id}[/green]"),
+                    SectionContent("Wallet", f"[green]{sdk.wallet_address}[/green]"),
+                ],
+            )
             return existing_agent_id
     except Exception as check_error:
-        console.print(f"[yellow]⚠️  Could not verify existing registration: {check_error}[/yellow]")
-    
+        presenter.note(
+            f"⚠️ Could not verify existing registration ({check_error}). Continuing with a fresh attempt.",
+            style="yellow",
+        )
+
     try:
-        # Register agent with metadata (ERC-8004 v1.0 compliant - new in v0.2.3!)
         metadata = {
             "agentName": sdk.agent_name.encode('utf-8'),
             "agentDomain": sdk.agent_domain.encode('utf-8')
         }
-        
-        with WaitBar("Submitting ERC-8004 registration transaction") as wait:
+
+        with WaitBar(console, "Submitting ERC-8004 registration transaction") as wait:
             agent_id, tx_hash = sdk.chaos_agent.register_agent(
                 token_uri="ipfs://QmDemo123",
-                metadata=metadata  # NEW: Metadata support!
+                metadata=metadata
             )
-        
+
         if tx_hash == "already_registered":
-            console.print("✅ Agent already registered with metadata on-chain!")
-            console.print(f"   Wallet: [cyan]{sdk.wallet_address}[/cyan]")
             record_result(
                 "Agent Registration",
                 "Already registered",
@@ -331,14 +271,18 @@ def demo_2_erc8004_identity(sdk):
                 agent_name=sdk.agent_name,
                 agent_wallet=sdk.wallet_address
             )
+            presenter.section(
+                "ERC-8004 Identity",
+                description=description,
+                bullets=["This wallet already owns an ERC-8004 profile with metadata."],
+                highlights=[
+                    SectionContent("Status", "[cyan]Metadata already present[/cyan]"),
+                    SectionContent("Agent ID", f"[green]{agent_id}[/green]"),
+                    SectionContent("Wallet", f"[green]{sdk.wallet_address}[/green]"),
+                ],
+            )
             return agent_id
-        
-        console.print(f"✅ Agent registered with metadata!")
-        console.print(f"   Transaction: [green]{tx_hash}[/green]")
-        console.print(f"   Agent ID: [green]{agent_id}[/green]")
-        console.print(f"   Metadata URI: [cyan]ipfs://QmDemo123[/cyan]")
-        console.print(f"   On-chain Metadata: [yellow]{len(metadata)} entries[/yellow]")
-        
+
         receipt = sdk.wallet_manager.w3.eth.get_transaction_receipt(tx_hash)
         record_result(
             "Agent Registration",
@@ -351,22 +295,31 @@ def demo_2_erc8004_identity(sdk):
             agent_name=sdk.agent_name,
             agent_wallet=sdk.wallet_address
         )
-        
+        presenter.section(
+            "ERC-8004 Identity",
+            description=description,
+            bullets=[
+                "Registered metadata pointer `ipfs://QmDemo123` with the identity contract.",
+            ],
+            highlights=[
+                SectionContent("Status", "[green]Registered[/green]"),
+                SectionContent("Agent ID", f"[green]{agent_id}[/green]"),
+                SectionContent("Tx Hash", f"[cyan]{tx_hash}[/cyan]"),
+                SectionContent("Metadata Keys", str(len(metadata))),
+            ],
+        )
         return agent_id
-        
+
     except Exception as e:
         latency = locals().get("wait").elapsed if "wait" in locals() and getattr(locals().get("wait"), "elapsed", None) else None
         error_str = str(e).lower()
         if "insufficient funds" in error_str or "balance 0" in error_str:
-            console.print("⚠️  Wallet needs testnet ETH for gas fees")
-            console.print(f"   Wallet: [cyan]{sdk.wallet_address}[/cyan]")
-            console.print(f"   Balance: [yellow]0.0000 ETH[/yellow]")
+            bullet = "Sepolia faucet funds are required for the registration transaction."
         elif "already registered" in error_str or "revert" in error_str:
-            console.print("✅ Agent already registered!")
-            console.print(f"   Wallet: [cyan]{sdk.wallet_address}[/cyan]")
+            bullet = "On-chain registry reports the agent as already registered."
         else:
-            console.print(f"⚠️  Registration error: {e}")
-        
+            bullet = f"Encountered unexpected error: {e}"
+
         record_result(
             "Agent Registration",
             "Failed",
@@ -375,33 +328,38 @@ def demo_2_erc8004_identity(sdk):
             agent_name=sdk.agent_name,
             agent_wallet=sdk.wallet_address
         )
-        
-        console.print("\n[bold]💰 To register on-chain:[/bold]")
-        console.print("   1. Get testnet ETH: [cyan]https://sepoliafaucet.com/[/cyan]")
-        console.print(f"   2. Send to: [green]{sdk.wallet_address}[/green]")
-        console.print("   3. Run this demo again")
+        presenter.section(
+            "ERC-8004 Identity",
+            description=description,
+            bullets=[bullet],
+            highlights=[
+                SectionContent("Status", "[red]Registration failed[/red]"),
+                SectionContent("Wallet", f"[green]{sdk.wallet_address}[/green]"),
+            ],
+        )
+        presenter.note(
+            "💰 Tip: fund the wallet via https://sepoliafaucet.com/ and rerun once balance is available.",
+            style="yellow",
+        )
         return None
 
 
 def demo_2b_metadata(sdk, agent_id):
     """Demo 2b: ERC-8004 on-chain metadata (NEW in v0.2.3!)."""
     if not agent_id:
-        console.print("\n[bold]📋 Demo 2b: ERC-8004 On-Chain Metadata[/bold]")
-        console.print("=" * 80)
-        console.print("⚠️  Skipped - agent not registered")
+        presenter.note(
+            "⏭️ Skipping on-chain metadata showcase because the agent is not registered.",
+            style="yellow",
+        )
         return
-    
-    console.print("\n[bold]📋 Demo 2b: ERC-8004 On-Chain Metadata (NEW!)[/bold]")
-    console.print("=" * 80)
-    
-    console.print("🔧 Setting additional metadata...")
-    
+
+    description = "Attach versioned metadata to the ERC-8004 identity and read it back."
+
     try:
         # Set additional metadata (requires testnet tokens)
-        with WaitBar("Submitting metadata update transaction") as wait:
+        with WaitBar(console, "Submitting metadata update transaction") as wait:
             tx_hash = sdk.chaos_agent.set_agent_metadata("version", b"1.0.0")
-        console.print("✅ Metadata set successfully!")
-        
+
         receipt = sdk.wallet_manager.w3.eth.get_transaction_receipt(tx_hash)
         record_result(
             "Metadata Update",
@@ -414,26 +372,35 @@ def demo_2b_metadata(sdk, agent_id):
             agent_name=sdk.agent_name,
             agent_wallet=sdk.wallet_address
         )
-        
+
         # Read metadata back
-        console.print("\n🔧 Reading on-chain metadata...")
         name = sdk.chaos_agent.get_agent_metadata("agentName")
         domain = sdk.chaos_agent.get_agent_metadata("agentDomain")
         version = sdk.chaos_agent.get_agent_metadata("version")
-        
-        console.print(f"✅ Metadata retrieved!")
-        console.print(f"   Name: [green]{name.decode('utf-8')}[/green]")
-        console.print(f"   Domain: [cyan]{domain.decode('utf-8')}[/cyan]")
-        console.print(f"   Version: [yellow]{version.decode('utf-8')}[/yellow]")
-        
+        presenter.section(
+            "ERC-8004 Metadata",
+            description=description,
+            bullets=["Version tag written on-chain and retrieved using the metadata accessor."],
+            highlights=[
+                SectionContent("Status", "[green]Updated[/green]"),
+                SectionContent("Tx Hash", f"[cyan]{tx_hash}[/cyan]"),
+                SectionContent("Agent Name", name.decode('utf-8')),
+                SectionContent("Agent Domain", domain.decode('utf-8')),
+                SectionContent("Version", version.decode('utf-8')),
+            ],
+        )
+
     except Exception as e:
         latency = locals().get("wait").elapsed if "wait" in locals() and getattr(locals().get("wait"), "elapsed", None) else None
         error_str = str(e).lower()
         if "insufficient funds" in error_str:
-            console.print("⚠️  Setting metadata requires testnet ETH (reading is free)")
+            presenter.note(
+                "⚠️ Setting metadata requires a small Sepolia balance; reading existing metadata is free.",
+                style="yellow",
+            )
         else:
-            console.print(f"⚠️  Metadata operations: {e}")
-        
+            presenter.note(f"⚠️ Metadata operations issue: {e}", style="yellow")
+
         record_result(
             "Metadata Update",
             "Failed",
@@ -446,12 +413,8 @@ def demo_2b_metadata(sdk, agent_id):
 
 def demo_3_storage(sdk):
     """Demo 3: Local IPFS storage."""
-    console.print("\n[bold]📋 Demo 3: Local IPFS Storage[/bold]")
-    console.print("=" * 80)
-    
-    console.print("🔧 Testing local IPFS storage...")
-    
-    # Create test data
+    description = "Push demo payloads to the local IPFS node and ensure they round-trip correctly."
+
     test_data = {
         "message": "Hello from ChaosChain SDK!",
         "timestamp": datetime.now().isoformat(),
@@ -459,66 +422,90 @@ def demo_3_storage(sdk):
     }
     
     start_time = time.perf_counter()
+    elapsed: float
     try:
-        # Store data
-        console.print("📤 Storing data to local IPFS...")
         import json
         result = sdk.storage_manager.put(json.dumps(test_data).encode())
         
         if result.success:
-            console.print(f"✅ Data stored!")
-            console.print(f"   URI: [green]{result.uri}[/green]")
-            
-            # Retrieve data
-            console.print("📥 Retrieving data from local IPFS...")
             retrieved = sdk.storage_manager.get(result.uri)
-            
             if retrieved:
-                console.print("✅ Data retrieved successfully!")
+                elapsed = time.perf_counter() - start_time
                 record_result(
                     "Local IPFS Storage",
                     "Success",
-                    latency=time.perf_counter() - start_time,
+                    latency=elapsed,
                     notes=f"URI: {result.uri}"
                 )
+                presenter.section(
+                    "Local IPFS Storage",
+                    description=description,
+                    bullets=[
+                        "Saved a JSON payload to the local node and pulled it back immediately.",
+                    ],
+                    highlights=[
+                        SectionContent("Status", "[green]Round-trip success[/green]"),
+                        SectionContent("IPFS URI", f"[green]{result.uri}[/green]"),
+                        SectionContent("Elapsed", f"{elapsed:.2f}s"),
+                    ],
+                )
+                return
             else:
-                console.print("⚠️  Could not retrieve data")
                 record_result(
                     "Local IPFS Storage",
                     "Failed",
                     latency=time.perf_counter() - start_time,
                     notes="Retrieval returned empty result"
                 )
-        else:
-            console.print(f"⚠️  Storage failed: {result.error}")
-            record_result(
-                "Local IPFS Storage",
-                "Failed",
-                latency=time.perf_counter() - start_time,
-                notes=str(result.error)
-            )
-            
+                presenter.section(
+                    "Local IPFS Storage",
+                    description=description,
+                    bullets=["Stored file but retrieval returned an empty payload."],
+                    highlights=[
+                        SectionContent("Status", "[yellow]Partial success[/yellow]"),
+                        SectionContent("IPFS URI", f"[cyan]{result.uri}[/cyan]"),
+                    ],
+                )
+                return
+
+        elapsed = time.perf_counter() - start_time
+        record_result(
+            "Local IPFS Storage",
+            "Failed",
+            latency=elapsed,
+            notes=str(result.error)
+        )
+        presenter.section(
+            "Local IPFS Storage",
+            description=description,
+            bullets=[f"Storage operation failed: {result.error}"],
+            highlights=[
+                SectionContent("Status", "[red]Storage failed[/red]"),
+            ],
+        )
     except Exception as e:
-        console.print(f"⚠️  Local IPFS not running: {e}")
-        console.print("   To enable: install IPFS Desktop or run `ipfs daemon`")
-        console.print("   Download: https://docs.ipfs.tech/install/")
         record_result(
             "Local IPFS Storage",
             "Failed",
             latency=time.perf_counter() - start_time,
             notes=str(e)
         )
+        presenter.section(
+            "Local IPFS Storage",
+            description=description,
+            bullets=[
+                f"Local node not responding ({e}). Start IPFS Desktop or run `ipfs daemon` before rerunning."
+            ],
+            highlights=[
+                SectionContent("Status", "[red]IPFS unavailable[/red]"),
+            ],
+        )
 
 
 def demo_4_process_integrity():
     """Demo 4: Process integrity verification."""
-    console.print("\n[bold]📋 Demo 4: Process Integrity Verification[/bold]")
-    console.print("=" * 80)
-    
     from chaoschain_sdk import ChaosChainAgentSDK, NetworkConfig
     from chaoschain_sdk.types import AgentRole
-    
-    console.print("🔧 Creating SDK with process integrity enabled...")
     
     start_time = time.perf_counter()
     sdk = ChaosChainAgentSDK(
@@ -531,26 +518,29 @@ def demo_4_process_integrity():
     )
     latency = time.perf_counter() - start_time
     
-    console.print("✅ Process integrity verifier initialized!")
-    console.print(f"   Agent: [cyan]{sdk.agent_name}[/cyan]")
-    console.print(f"   Verifier: [green]Local ChaosChain Process Integrity[/green]")
-    
-    console.print("\n[dim]Note: Process integrity generates cryptographic proofs for function executions[/dim]")
-    console.print("[dim]      This ensures transparency and verifiability of AI agent operations[/dim]")
-    
     record_result(
         "Process Integrity Setup",
         "Success",
         latency=latency,
         notes="Integrity verifier active"
     )
+    presenter.section(
+        "Process Integrity Verification",
+        description="Turn on deterministic execution proofs for the agent runtime.",
+        bullets=[
+            "Local verifier records transcripts for each critical SDK action.",
+            "Proof artifacts can be shared to external auditors or partners.",
+        ],
+        highlights=[
+            SectionContent("Status", "[green]Verifier active[/green]"),
+            SectionContent("Agent", sdk.agent_name),
+            SectionContent("Setup Time", f"{latency:.2f}s"),
+        ],
+    )
 
 
 def demo_5_x402_payments():
     """Demo 5: x402 payment protocol."""
-    console.print("\n[bold]📋 Demo 5: x402 Payment Protocol (Coinbase)[/bold]")
-    console.print("=" * 80)
-    
     from chaoschain_sdk import ChaosChainAgentSDK, NetworkConfig
     from chaoschain_sdk.types import AgentRole
     from chaoschain_sdk.exceptions import PaymentError
@@ -563,22 +553,30 @@ def demo_5_x402_payments():
         enable_ap2=True 
     )
     
-    console.print("✅ x402 Payment Manager initialized!")
-    console.print(f"   Protocol: [cyan]Coinbase x402 v0.2.1+[/cyan]")
-    console.print(f"   Token: [yellow]USDC (ERC-20)[/yellow]")
-    console.print(f"   Treasury: [green]0x20E7B2A2c8969725b88Dd3EF3a11Bc3353C83F70[/green]")
-    
     payer_agent = os.environ.get("X402_PAYER_AGENT", "DemoAgent")
     payment_amount = float(os.environ.get("X402_PAYMENT_AMOUNT_USDC", "0.001"))
     total_runs = int(os.environ.get("X402_PAYMENT_COUNT", "3"))
+    description = (
+        "Execute Coinbase x402 payments end-to-end, including request creation, proof collection, and on-chain settlement."
+    )
 
-    console.print(f"\n💳 Payer agent: [cyan]{payer_agent}[/cyan]")
-    console.print(f"🪙 Payment amount per run: [yellow]{payment_amount:.3f} USDC[/yellow]")
-    console.print(f"🔁 Total runs: [cyan]{total_runs}[/cyan]")
+    presenter.section(
+        "x402 Payment Protocol (Coinbase)",
+        description=description,
+        bullets=[
+            "Uses ChaosChain payment manager to orchestrate the x402 flow.",
+            "Each run mints a payment request, executes it, and records proofs.",
+        ],
+        highlights=[
+            SectionContent("Payer Agent", payer_agent),
+            SectionContent("Amount Per Run", f"[yellow]{payment_amount:.3f} USDC[/yellow]"),
+            SectionContent("Runs", str(total_runs)),
+            SectionContent("Treasury", "[green]0x20E7B2A2c8969725b88Dd3EF3a11Bc3353C83F70[/green]"),
+        ],
+    )
     
     payment_manager = getattr(sdk, "payment_manager", None)
     if not payment_manager:
-        console.print("[red]❌ Payment manager unavailable[/red]")
         record_result(
             "x402 Payment Execution",
             "Failed",
@@ -587,15 +585,17 @@ def demo_5_x402_payments():
             agent_name=payer_agent,
             agent_wallet=sdk.wallet_manager.get_wallet_address(payer_agent)
         )
+        presenter.note("❌ Payment manager unavailable — check SDK configuration.", style="red")
         return
     
+    summary_rows = []
+    successes = 0
+
     for run_index in range(1, total_runs + 1):
-        console.print(f"\n[bold]🔧 Payment {run_index}/{total_runs}[/bold]")
         payment_proof = None
         payment_latency: Optional[float] = None
         last_error: Optional[Exception] = None
 
-        console.print("   Creating x402 payment request...")
         try:
             if getattr(sdk, "a2a_x402", None):
                 w3c_payment_request = sdk.create_x402_payment_request(
@@ -605,10 +605,8 @@ def demo_5_x402_payments():
                     items=[{"name": f"ChaosChain Demo Service #{run_index}", "price": payment_amount}],
                     settlement_address=sdk.wallet_address
                 )
-                console.print(f"   Request ID: [cyan]{w3c_payment_request.id}[/cyan]")
-                console.print(f"   Settlement address: [green]{w3c_payment_request.settlement_address}[/green]")
             else:
-                console.print("   Using payment manager directly (no W3C wrapper)")
+                w3c_payment_request = None
             
             manager_request = payment_manager.create_x402_payment_request(
                 from_agent=payer_agent,
@@ -618,14 +616,13 @@ def demo_5_x402_payments():
                 service_description=f"Demo payment via x402 (run {run_index})"
             )
             
-            with WaitBar(f"Executing x402 payment #{run_index} ({payment_amount:.3f} USDC)") as wait:
+            wait_title = f"Executing x402 payment #{run_index} ({payment_amount:.3f} USDC)"
+            with WaitBar(console, wait_title) as wait:
                 payment_proof = payment_manager.execute_x402_payment(manager_request)
             payment_latency = wait.elapsed
         except PaymentError as e:
-            console.print(f"[yellow]⚠️  x402 payment attempt failed: {e}[/yellow]")
             last_error = e
         except Exception as generic_error:
-            console.print(f"[red]❌ Unexpected error during x402 payment: {generic_error}[/red]")
             last_error = generic_error
         
         if not payment_proof:
@@ -637,23 +634,25 @@ def demo_5_x402_payments():
                 agent_name=payer_agent,
                 agent_wallet=sdk.wallet_manager.get_wallet_address(payer_agent)
             )
-            console.print("[red]❌ Payment aborted[/red]")
+            summary_rows.append(
+                (run_index, "[red]Failed[/red]", payment_latency, "—", str(last_error) if last_error else "Unknown error")
+            )
+            presenter.note(
+                f"❌ Payment {run_index}/{total_runs} failed: {last_error}",
+                style="red",
+            )
             continue
-        
-        console.print("[green]✅ x402 payment executed on-chain![/green]")
-        console.print(f"   Payment amount: [green]{payment_amount:.3f} USDC[/green]")
         
         main_tx = payment_proof.transaction_hash
         fee_tx = payment_proof.receipt_data.get("protocol_fee_tx") if payment_proof.receipt_data else None
-        console.print(f"   Main payment tx: [green]{main_tx}[/green]")
-        if fee_tx:
-            console.print(f"   Protocol fee tx: [cyan]{fee_tx}[/cyan]")
-        
         try:
             main_receipt = sdk.wallet_manager.w3.eth.get_transaction_receipt(main_tx)
         except Exception as receipt_error:
-            console.print(f"[yellow]⚠️  Could not fetch main payment receipt: {receipt_error}[/yellow]")
             main_receipt = None
+            presenter.note(
+                f"⚠️ Could not fetch main payment receipt: {receipt_error}",
+                style="yellow",
+            )
         
         notes_parts = [f"Amount: {payment_amount:.3f} USDC"]
         if fee_tx:
@@ -674,51 +673,100 @@ def demo_5_x402_payments():
             agent_name=payer_agent,
             agent_wallet=sdk.wallet_manager.get_wallet_address(payer_agent)
         )
+        successes += 1
+        summary_rows.append(
+            (
+                run_index,
+                "[green]Success[/green]",
+                payment_latency,
+                main_tx,
+                "Fee tx recorded" if fee_tx else "Single tx",
+            )
+        )
+        presenter.note(
+            f"✅ Payment {run_index}/{total_runs} settled (tx {main_tx}).",
+            style="green",
+        )
+
+    if summary_rows:
+        summary_table = Table(title=None, show_header=True, header_style="bold cyan")
+        summary_table.add_column("Run", justify="right")
+        summary_table.add_column("Status")
+        summary_table.add_column("Latency (s)", justify="right")
+        summary_table.add_column("Main Tx", overflow="fold")
+        summary_table.add_column("Notes", overflow="fold")
+
+        for run_index, status, latency, tx_hash, info in summary_rows:
+            latency_text = f"{latency:.2f}" if latency is not None else "—"
+            summary_table.add_row(str(run_index), status, latency_text, tx_hash, info)
+
+        presenter.section(
+            "x402 Payment Runs",
+            description="Summary of Coinbase x402 demo executions.",
+            highlights=[
+                SectionContent("Successful Runs", f"{successes}/{len(summary_rows)}"),
+                SectionContent("Amount per Run", f"{payment_amount:.3f} USDC"),
+            ],
+            extra=summary_table,
+        )
 
 
 def print_summary():
     """Print demo summary."""
-    console.print("\n" + "=" * 80)
-    console.print("[bold green]🎉 Ethereum Install Demo Complete![/bold green]\n")
-    
-    if demo_results:
-        metrics_table = Table(title="Demo Execution Metrics", show_lines=False)
-        metrics_table.add_column("Step", style="cyan")
-        metrics_table.add_column("Status", style="green")
-        metrics_table.add_column("Agent", style="magenta")
-        metrics_table.add_column("Wallet", style="yellow")
-        metrics_table.add_column("Latency (s)", justify="right")
-        metrics_table.add_column("Gas Used", justify="right")
-        metrics_table.add_column("Gas Price (gwei)", justify="right")
-        metrics_table.add_column("Gas Cost (ETH)", justify="right")
-        metrics_table.add_column("Tx Hash", overflow="fold")
-        metrics_table.add_column("Notes", overflow="fold")
-        
-        for result in demo_results:
-            latency = f"{result.latency:.2f}" if result.latency is not None else "-"
-            gas_used = f"{result.gas_used:,}" if result.gas_used is not None else "-"
-            gas_price = f"{result.gas_price_gwei:.2f}" if result.gas_price_gwei is not None else "-"
-            gas_cost = f"{result.gas_cost_eth:.6f}" if result.gas_cost_eth is not None else "-"
-            tx_hash = result.tx_hash or "-"
-            notes = result.notes or "-"
-            agent = result.agent_name or "-"
-            wallet = result.agent_wallet or "-"
-            
-            metrics_table.add_row(
-                result.name,
-                result.status,
-                agent,
-                wallet,
-                latency,
-                gas_used,
-                tx_hash,
-                notes
-            )
-        
-        console.print()
-        console.print(metrics_table)
-    
-    console.print()
+    if not demo_results:
+        presenter.note("No demo steps were executed.", style="yellow")
+        return
+
+    summary_table = Table(show_header=True, header_style="bold cyan")
+    summary_table.add_column("Step")
+    summary_table.add_column("Status")
+    summary_table.add_column("Agent", style="magenta")
+    summary_table.add_column("Latency (s)", justify="right")
+    summary_table.add_column("Tx / Notes", overflow="fold")
+
+    total_latency = 0.0
+    success_count = 0
+
+    for result in demo_results:
+        latency_value = result.latency or 0.0
+        total_latency += latency_value
+        status_lower = (result.status or "").lower()
+        if "success" in status_lower:
+            status_display = "[green]Success[/green]"
+            success_count += 1
+        elif "fail" in status_lower:
+            status_display = "[red]Failed[/red]"
+        elif "using" in status_lower or "already" in status_lower:
+            status_display = "[cyan]Skipped[/cyan]"
+        else:
+            status_display = result.status or "-"
+
+        latency_text = f"{latency_value:.2f}" if result.latency is not None else "—"
+        note_parts = []
+        if result.tx_hash:
+            note_parts.append(result.tx_hash)
+        if result.notes:
+            note_parts.append(result.notes)
+        info = " | ".join(note_parts) if note_parts else "—"
+
+        summary_table.add_row(
+            result.name,
+            status_display,
+            result.agent_name or "—",
+            latency_text,
+            info,
+        )
+
+    presenter.section(
+        "Demo Summary",
+        description="High-level view of each step executed during the Genesis Studio walkthrough.",
+        highlights=[
+            SectionContent("Steps Run", str(len(demo_results))),
+            SectionContent("Successful", f"{success_count}/{len(demo_results)}"),
+            SectionContent("Total Latency", f"{total_latency:.2f}s"),
+        ],
+        extra=summary_table,
+    )
 
 
 def main():
@@ -740,7 +788,10 @@ def main():
             # Demo 2b: Metadata (NEW in v0.2.3!)
             demo_2b_metadata(sdk, agent_id)
         else:
-            console.print("\n[bold]🛑 Skipping on-chain registration (DEMO_REGISTER_AGENT=false)[/bold]")
+            presenter.note(
+                "⏭️ Skipping on-chain registration (DEMO_REGISTER_AGENT=false).",
+                style="yellow",
+            )
             record_result(
                 "Agent Registration",
                 "Skipped",
