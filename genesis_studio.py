@@ -170,6 +170,42 @@ class GenesisStudioX402Orchestrator:
     """Enhanced Genesis Studio orchestrator with x402 payment integration"""
     
     def __init__(self):
+        # Resolve target network (default to Ethereum Sepolia)
+        network_env = os.getenv("NETWORK", NetworkConfig.ETHEREUM_SEPOLIA.value)
+        try:
+            self.network = NetworkConfig(network_env)
+        except ValueError:
+            rprint(f"[yellow]⚠️  Unsupported NETWORK '{network_env}', defaulting to ethereum-sepolia[/yellow]")
+            self.network = NetworkConfig.ETHEREUM_SEPOLIA
+        
+        self.network_label = self.network.value.replace("-", " ").title()
+        self.using_zerog = self.network == NetworkConfig.ZEROG_TESTNET
+        
+        gas_token_by_network = {
+            NetworkConfig.ZEROG_TESTNET: "A0GI",
+            NetworkConfig.BASE_SEPOLIA: "ETH",
+            NetworkConfig.ETHEREUM_SEPOLIA: "ETH",
+            NetworkConfig.OPTIMISM_SEPOLIA: "ETH",
+            NetworkConfig.MODE_TESTNET: "MODE",
+        }
+        payment_token_by_network = {
+            NetworkConfig.ZEROG_TESTNET: "A0GI",
+            NetworkConfig.BASE_SEPOLIA: "USDC",
+            NetworkConfig.ETHEREUM_SEPOLIA: "USDC",
+            NetworkConfig.OPTIMISM_SEPOLIA: "USDC",
+            NetworkConfig.MODE_TESTNET: "USDC",
+        }
+        faucet_by_network = {
+            NetworkConfig.ZEROG_TESTNET: "https://faucet.0g.ai/",
+            NetworkConfig.BASE_SEPOLIA: "https://www.coinbase.com/faucets/base-ethereum-sepolia-faucet",
+            NetworkConfig.ETHEREUM_SEPOLIA: "https://sepoliafaucet.com/",
+            NetworkConfig.OPTIMISM_SEPOLIA: "https://rollupbridge.com/optimism/sepolia-testnet-faucet",
+        }
+        
+        self.gas_token_symbol = gas_token_by_network.get(self.network, "ETH")
+        self.payment_token_symbol = payment_token_by_network.get(self.network, self.gas_token_symbol)
+        self.faucet_url = faucet_by_network.get(self.network)
+        
         # Track results for final summary
         self.results = {}
         
@@ -249,7 +285,7 @@ class GenesisStudioX402Orchestrator:
         rprint("[green]✅ Agent SDKs initialized[/green]")
         
         # Step 3: Fund wallets from faucet
-        rprint("\n[blue]🔧 Step 3: Funding wallets from Base Sepolia faucet...[/blue]")
+        rprint(f"\n[blue]🔧 Step 3: Funding wallets on {self.network_label}...[/blue]")
         self._fund_agent_wallets()
         rprint("[green]✅ Wallets funded[/green]")
         
@@ -262,7 +298,9 @@ class GenesisStudioX402Orchestrator:
         """Phase 2: Triple-Verified Stack Work & Payment"""
         
         rprint("\n[bold blue]📋 Phase 2: Triple-Verified Stack Work & Payment[/bold blue]")
-        rprint("[cyan]Alice performs smart shopping with AP2 intent verification, ChaosChain process integrity (0G Compute), and x402 payments (A0GI)[/cyan]")
+        compute_desc = "ChaosChain process integrity (0G Compute)" if self.using_zerog else "ChaosChain process integrity"
+        payment_desc = f"x402 payments ({self.payment_token_symbol})"
+        rprint(f"[cyan]Alice performs smart shopping with AP2 intent verification, {compute_desc}, and {payment_desc}[/cyan]")
         rprint("=" * 80)
         
         # Step 5: AP2 Intent Verification
@@ -276,14 +314,15 @@ class GenesisStudioX402Orchestrator:
         rprint("[green]✅ Smart shopping completed with process integrity proof[/green]")
         
         # Step 7: Evidence Storage (Alice) - Using 0G Storage
-        rprint("\n[blue]🔧 Step 7: Storing analysis on 0G Storage...[/blue]")
+        storage_label = "0G Storage" if self.using_zerog else "configured storage backend"
+        rprint(f"\n[blue]🔧 Step 7: Storing analysis on {storage_label}...[/blue]")
         analysis_cid = self._store_analysis_on_0g_storage(analysis_data, process_integrity_proof)
         rprint("[green]✅ Analysis stored on 0G Storage[/green]")
         
-        # Step 8: 0G Token Payment (A0GI) with AP2 authorization
-        rprint("\n[blue]🔧 Step 8: Processing 0G token payment with AP2 authorization (A0GI)...[/blue]")
-        payment_results = self._execute_0g_token_payment(analysis_cid, analysis_data, intent_mandate)
-        rprint(f"[green]✅ Payment completed: {payment_results['amount']:.4f} A0GI (Charlie → Alice)[/green]")
+        # Step 8: Network Payment with AP2 authorization
+        rprint(f"\n[blue]🔧 Step 8: Processing {self.payment_token_symbol} payment with AP2 authorization...[/blue]")
+        payment_results = self._execute_network_payment(analysis_cid, analysis_data, intent_mandate)
+        rprint(f"[green]✅ Payment completed: {payment_results['amount']:.4f} {self.payment_token_symbol} (Charlie → Alice)[/green]")
         
         # Step 6: Validation Request (Alice → Bob)
         rprint("\n[blue]🔧 Step 6: Alice requesting validation from Bob...[/blue]")
@@ -314,19 +353,14 @@ class GenesisStudioX402Orchestrator:
     
     def _validate_configuration(self):
         """Validate all required environment variables including x402"""
-        network = os.getenv("NETWORK", "base-sepolia")
-        
-        # Core required variables (network-specific)
-        if network == "0g-testnet":
-            required_vars = [
-                "NETWORK", "ZEROG_TESTNET_RPC_URL", "ZEROG_TESTNET_PRIVATE_KEY"
-            ]
-        elif network == "base-sepolia":
-            required_vars = [
-                "NETWORK", "BASE_SEPOLIA_RPC_URL", "BASE_SEPOLIA_PRIVATE_KEY"
-            ]
-        else:
-            required_vars = ["NETWORK"]
+        required_by_network = {
+            NetworkConfig.ZEROG_TESTNET: ["NETWORK", "ZEROG_TESTNET_RPC_URL", "ZEROG_TESTNET_PRIVATE_KEY"],
+            NetworkConfig.BASE_SEPOLIA: ["NETWORK", "BASE_SEPOLIA_RPC_URL", "BASE_SEPOLIA_PRIVATE_KEY"],
+            NetworkConfig.ETHEREUM_SEPOLIA: ["NETWORK", "SEPOLIA_RPC_URL", "SEPOLIA_PRIVATE_KEY"],
+            NetworkConfig.OPTIMISM_SEPOLIA: ["NETWORK", "OPTIMISM_SEPOLIA_RPC_URL", "OPTIMISM_SEPOLIA_PRIVATE_KEY"],
+            NetworkConfig.MODE_TESTNET: ["NETWORK", "MODE_TESTNET_RPC_URL", "MODE_TESTNET_PRIVATE_KEY"],
+        }
+        required_vars = required_by_network.get(self.network, ["NETWORK"])
         
         # Optional variables (for enhanced features)
         optional_vars = [
@@ -354,9 +388,10 @@ class GenesisStudioX402Orchestrator:
             rprint("[yellow]   Storage will use local IPFS fallback (free option)[/yellow]")
             rprint("[yellow]   To enable Pinata: set PINATA_JWT and PINATA_GATEWAY[/yellow]")
         
-        # Validate network is set to 0g-testnet
-        if os.getenv("NETWORK") != "0g-testnet":
-            rprint("[yellow]⚠️  Network is not set to '0g-testnet'. This demo is designed for 0G Testnet.[/yellow]")
+        if self.using_zerog:
+            rprint("[green]ℹ️  Running Genesis Studio on 0G Testnet[/green]")
+        else:
+            rprint(f"[cyan]ℹ️  Running Genesis Studio on {self.network_label}[/cyan]")
     
     def _initialize_agent_sdks(self):
         """Initialize CrewAI-powered agents with ChaosChain SDK integration"""
@@ -364,62 +399,68 @@ class GenesisStudioX402Orchestrator:
         # Create CrewAI-powered agents with ChaosChain SDK integration
         rprint("[yellow]🤖 Initializing CrewAI-powered agents with ChaosChain SDK...[/yellow]")
         
-        # Initialize 0G providers for storage and compute
-        try:
-            # Try to import 0G providers (may not be available in PyPI version)
-            from chaoschain_sdk.providers.storage import ZeroGStorageGRPC
-            from chaoschain_sdk.providers.compute import ZeroGComputeGRPC, VerificationMethod
-            
-            # Both services on same unified server
-            self.zg_compute = ZeroGComputeGRPC(grpc_url="localhost:50051")
-            self.zg_storage = ZeroGStorageGRPC(grpc_url="localhost:50051")
-            
-            if self.zg_compute.is_available:
-                rprint("[green]✅ 0G Compute gRPC service available[/green]")
-            else:
-                rprint("[yellow]⚠️  0G Compute gRPC service not available[/yellow]")
-            
-            if self.zg_storage.is_available:
-                rprint("[green]✅ 0G Storage gRPC service available[/green]")
-            else:
-                rprint("[yellow]⚠️  0G Storage gRPC service not available[/yellow]")
+        # Initialize optional 0G providers for storage and compute
+        self.zg_storage = None
+        self.zg_compute = None
+        zg_storage = None
+        zg_compute = None
+        
+        if self.using_zerog:
+            try:
+                from chaoschain_sdk.providers.storage import ZeroGStorageGRPC
+                from chaoschain_sdk.providers.compute import ZeroGComputeGRPC, VerificationMethod
                 
-            rprint("[green]✅ 0G gRPC providers initialized[/green]")
-            zg_storage = self.zg_storage
-            zg_compute = self.zg_compute
-        except Exception as e:
-            rprint(f"[yellow]⚠️  0G gRPC providers not available: {e}[/yellow]")
-            rprint("[yellow]   Storage will fallback to IPFS, compute will use local[/yellow]")
-            self.zg_storage = None
-            self.zg_compute = None
-            zg_storage = None
-            zg_compute = None
+                self.zg_compute = ZeroGComputeGRPC(grpc_url="localhost:50051")
+                self.zg_storage = ZeroGStorageGRPC(grpc_url="localhost:50051")
+                
+                if self.zg_compute.is_available:
+                    rprint("[green]✅ 0G Compute gRPC service available[/green]")
+                else:
+                    rprint("[yellow]⚠️  0G Compute gRPC service not available[/yellow]")
+                
+                if self.zg_storage.is_available:
+                    rprint("[green]✅ 0G Storage gRPC service available[/green]")
+                else:
+                    rprint("[yellow]⚠️  0G Storage gRPC service not available[/yellow]")
+                    
+                rprint("[green]✅ 0G gRPC providers initialized[/green]")
+                zg_storage = self.zg_storage
+                zg_compute = self.zg_compute
+            except Exception as e:
+                rprint(f"[yellow]⚠️  0G gRPC providers not available: {e}[/yellow]")
+                rprint("[yellow]   Storage will fallback to IPFS, compute will use local[/yellow]")
+                self.zg_storage = None
+                self.zg_compute = None
+                zg_storage = None
+                zg_compute = None
+        else:
+            rprint("[cyan]ℹ️  Skipping 0G gRPC providers (network != 0g-testnet)[/cyan]")
         
         self.alice_agent = GenesisServerAgentSDK(
             agent_name="Alice",
             agent_domain="alice.chaoschain-studio.com",
             agent_role=AgentRole.SERVER,
-            network=NetworkConfig.ZEROG_TESTNET,  # Using 0G Testnet
+            network=self.network,
             enable_ap2=True,
             enable_process_integrity=True,
-            use_0g_inference=True  # ✅ 0G Compute AI inference
+            use_0g_inference=self.using_zerog
         )
         
         self.bob_agent = GenesisValidatorAgentSDK(
             agent_name="Bob",
             agent_domain="bob.chaoschain-studio.com",
             agent_role=AgentRole.VALIDATOR,
-            network=NetworkConfig.ZEROG_TESTNET,  # Using 0G Testnet
+            network=self.network,
             enable_ap2=True,
             enable_process_integrity=True,
-            use_0g_inference=True  # ✅ 0G Compute AI validation
+            use_0g_inference=self.using_zerog
         )
         
         self.charlie_agent = GenesisClientAgent(
             agent_name="Charlie",
             agent_domain="charlie.chaoschain-studio.com",
             agent_role=AgentRole.CLIENT,
-            network=NetworkConfig.ZEROG_TESTNET,  # Using 0G Testnet
+            network=self.network,
             enable_ap2=True,  
             enable_process_integrity=False  # Client doesn't need process integrity
         )
@@ -449,25 +490,29 @@ class GenesisStudioX402Orchestrator:
         }
     
     def _fund_agent_wallets(self):
-        """Fund all agent wallets from 0G Testnet faucet"""
+        """Fund all agent wallets from the appropriate faucet"""
         
         agents = [("Alice", self.alice_sdk), ("Bob", self.bob_sdk), ("Charlie", self.charlie_sdk)]
         funded_agents = []
+        min_balance = 0.001 if self.gas_token_symbol == "A0GI" else 0.01
         
         print("💰 Checking wallet balances...")
         for agent_name, sdk in agents:
             balance = sdk.wallet_manager.get_wallet_balance(agent_name)
             address = sdk.wallet_manager.get_wallet_address(agent_name)
-            print(f"   {agent_name}: {balance:.4f} A0GI ({address})")
+            print(f"   {agent_name}: {balance:.4f} {self.gas_token_symbol} ({address})")
             
-            if balance > 0.001:  # Has some A0GI for gas
+            if balance > min_balance:
                 funded_agents.append(agent_name)
             else:
-                print(f"   ⚠️  {agent_name} needs funding. Please send A0GI to {address}")
+                print(f"   ⚠️  {agent_name} needs funding. Please send {self.gas_token_symbol} to {address}")
         
         if len(funded_agents) == 0:
-            print("🔗 Fund your wallets at: https://faucet.0g.ai/")
-            print("   Each wallet needs ~0.1 A0GI for gas fees")
+            if self.faucet_url:
+                print(f"🔗 Fund your wallets at: {self.faucet_url}")
+            else:
+                print("🔗 Fund your wallets using an appropriate testnet faucet.")
+            print(f"   Each wallet needs ~{min_balance:.3f} {self.gas_token_symbol} for gas fees")
         
         self.results["funding"] = {
             "success": len(funded_agents) > 0,
@@ -734,11 +779,11 @@ Respond in JSON format with fields: product_name, price, color, quality_score, v
             }
             return None
     
-    def _execute_0g_token_payment(self, analysis_cid: str, analysis_data: Dict[str, Any], cart_mandate: Any) -> Dict[str, Any]:
-        """Execute x402 payment with A0GI tokens - Charlie pays Alice (with AP2 intent authorization)"""
+    def _execute_network_payment(self, analysis_cid: str, analysis_data: Dict[str, Any], cart_mandate: Any) -> Dict[str, Any]:
+        """Execute x402 payment on the active network."""
         
         # Calculate payment based on analysis quality (using small amounts for demo)
-        base_payment = 0.00005  # Base 0.00005 A0GI (small amount for demo with limited funds)
+        base_payment = 0.00005 if self.using_zerog else 1.0
         confidence_score = analysis_data.get("analysis", {}).get("confidence", 0.85)
         quality_multiplier = confidence_score  # Direct confidence scaling
         final_amount = base_payment * quality_multiplier
@@ -757,12 +802,11 @@ Respond in JSON format with fields: product_name, price, color, quality_score, v
         rprint(f"   Authorization Method: Google AP2")
         rprint()
         
-        # x402 Crypto Settlement with A0GI (Layer 3 of Triple-Verified Stack)
-        rprint(f"[cyan]💰 x402 Crypto Settlement (A0GI tokens):[/cyan]")
-        print(f"💰 Creating x402 payment request: Charlie → Alice ({final_amount:.4f} A0GI)")
+        # x402 Crypto Settlement
+        rprint(f"[cyan]💰 x402 Crypto Settlement ({self.payment_token_symbol}):[/cyan]")
+        print(f"💰 Creating x402 payment request: Charlie → Alice ({final_amount:.4f} {self.payment_token_symbol})")
         
-        # Execute direct A0GI payment on 0G network
-        rprint(f"[yellow]📤 Executing direct A0GI transfer...[/yellow]")
+        rprint(f"[yellow]📤 Executing payment transfer...[/yellow]")
         
         x402_payment_result = self.charlie_sdk.execute_payment(
             to_agent="Alice",
@@ -771,33 +815,36 @@ Respond in JSON format with fields: product_name, price, color, quality_score, v
         )
         
         # Display payment results
-        rprint(f"[green]💳 Payment Successful (Direct A0GI Transfer)[/green]")
+        rprint(f"[green]💳 Payment Successful[/green]")
         rprint(f"   From: Charlie")
         rprint(f"   To: Alice")
-        rprint(f"   Amount: {x402_payment_result.amount:.4f} A0GI")
+        rprint(f"   Amount: {x402_payment_result.amount:.4f} {self.payment_token_symbol}")
         rprint(f"   Transaction: {x402_payment_result.transaction_hash}")
-        tx_hash = x402_payment_result.transaction_hash if x402_payment_result.transaction_hash.startswith('0x') else f"0x{x402_payment_result.transaction_hash}"
-        rprint(f"   Explorer: https://chainscan-galileo.0g.ai/tx/{tx_hash}")
-        rprint(f"   Service: Smart Shopping Service")
-        rprint(f"   Network: 0G Galileo Testnet")
+        if self.using_zerog:
+            tx_hash = x402_payment_result.transaction_hash if x402_payment_result.transaction_hash.startswith('0x') else f"0x{x402_payment_result.transaction_hash}"
+            rprint(f"   Explorer: https://chainscan-galileo.0g.ai/tx/{tx_hash}")
+            rprint(f"   Network: 0G Galileo Testnet")
+        else:
+            rprint(f"   Network: {self.network_label}")
         
         # Triple-Verified Stack Summary
         rprint()
         rprint(f"[bold green]🔗 Triple-Verified Stack Complete:[/bold green]")
         rprint(f"   ✅ Layer 1: AP2 Intent Verification (Google)")
-        rprint(f"   ✅ Layer 2: ChaosChain Process Integrity (ChaosChain + 0G Compute)")
+        layer2_summary = "ChaosChain Process Integrity (ChaosChain + 0G Compute)" if self.using_zerog else "ChaosChain Process Integrity"
+        rprint(f"   ✅ Layer 2: {layer2_summary}")
         rprint(f"   ✅ Layer 3: Adjudication/Accountability (ChaosChain)")
         
         payment_results = {
             "x402_payment_result": x402_payment_result,
             "amount": x402_payment_result.amount,
             "ap2_authorized": True,
-            "currency": "A0GI",
+            "currency": self.payment_token_symbol,
             "from": "Charlie",
             "to": "Alice",
             "service": "smart_shopping",
             "x402_success": bool(x402_payment_result.transaction_hash),
-            "network": "0G Testnet",
+            "network": self.network_label,
             "triple_verified": True
         }
         
