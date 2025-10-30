@@ -49,7 +49,7 @@ from py_ecc.bls import G2Basic as bls
 from web3 import Web3
 from web3.types import TxReceipt
 from web3.exceptions import ABIFunctionNotFound
-from rich.console import Console
+from rich.console import Console, Group
 from rich.panel import Panel
 from rich.table import Table
 from demo_presenter import DemoNarrator, SectionContent, WaitBar
@@ -91,6 +91,13 @@ class DemoStepResult:
 
 
 demo_results: List[DemoStepResult] = []
+
+
+def _shorten(text: str, limit: int = 72) -> str:
+    """Trim long strings for console-friendly summaries."""
+    if not text or len(text) <= limit:
+        return text or ""
+    return text[: limit - 1] + "…"
 
 
 def record_result(
@@ -326,9 +333,12 @@ class GuaranteeRecord:
     tab_id: int
     tab_id_hex: str
     req_id: int
+    label: str
     amount_wei: int
     guarantee_payload: Dict
-    execution_latency: float
+    request_latency: float
+    verify_latency: float
+    total_latency: float
     guarantee_id: str
 
 
@@ -765,6 +775,7 @@ def request_guarantee(
     tab_id_int: int,
     req_id: int,
     amount_wei: int,
+    run_label: str,
     fixed_timestamp: Optional[int] = None,
 ) -> tuple[GuaranteeRecord, int]:
     timestamp = fixed_timestamp or int(datetime.now(timezone.utc).timestamp())
@@ -787,7 +798,7 @@ def request_guarantee(
         "scheme": "eip712",
     }
 
-    with WaitBar(console, "Requesting guarantee record") as wait:
+    with WaitBar(console, f"{run_label} · requesting credit guarantee") as request_wait:
         try:
             guarantee_response = rest_post("core/guarantees", guarantee_request)
         except requests.HTTPError as http_err:
@@ -800,7 +811,9 @@ def request_guarantee(
                 f"Guarantee request failed (status {http_err.response.status_code}): {error_body}"
             ) from http_err
 
-    with WaitBar(console, "Verifying BLS certificate") as wait:
+    request_latency = request_wait.elapsed or 0.0
+
+    with WaitBar(console, f"{run_label} · verifying BLS certificate") as verify_wait:
         public_key_raw = public_params["public_key"]
         if isinstance(public_key_raw, str):
             public_key_bytes = bytes.fromhex(public_key_raw)
@@ -816,17 +829,22 @@ def request_guarantee(
         if not bls.Verify(public_key_bytes, certificate_claims, certificate_signature):
             raise ValueError("BLS signature verification failed")
 
+    verify_latency = verify_wait.elapsed or 0.0
+
     return (
         GuaranteeRecord(
             tab_id=tab_id_int,
             tab_id_hex=hex(tab_id_int),
             req_id=req_id,
+            label=run_label,
             amount_wei=amount_wei,
             guarantee_payload={
                 "claims": guarantee_request["claims"],
                 "bls_signature": guarantee_response["signature"],
             },
-            execution_latency=wait.elapsed,
+            request_latency=request_latency,
+            verify_latency=verify_latency,
+            total_latency=request_latency + verify_latency,
             guarantee_id=guarantee_response.get("id", str(uuid.uuid4())),
         ),
         timestamp,
@@ -844,24 +862,57 @@ def settle_aggregate(total_amount_wei: int, tab_int: int):
     return receipt
 
 
-def print_summary(guarantees: List[GuaranteeRecord], settlement_receipt):
+def build_headline_panel(
+    total_latency: float,
+    avg_latency: float,
+    total_gas_used: int,
+) -> Panel:
+    """Generate a bold recap panel for executive audiences."""
+    gas_used_text = f"{total_gas_used:,}" if total_gas_used else "0"
+    avg_latency_text = f"{avg_latency:.2f}s" if avg_latency else "—"
+
+    body = (
+        "[bold bright_white]Total Latency[/bold bright_white]\n"
+        f"[bold cyan]{total_latency:.2f}s[/bold cyan]\n\n"
+        "[bold bright_white]Avg Step Latency[/bold bright_white]\n"
+        f"[bold cyan]{avg_latency_text}[/bold cyan]\n\n"
+        "[bold bright_white]Total Gas Used[/bold bright_white]\n"
+        f"[bold cyan]{gas_used_text}[/bold cyan]"
+    )
+    return Panel.fit(
+        body,
+        title="⚡ Credit Efficiency Recap",
+        border_style="magenta",
+        padding=(1, 6),
+    )
+
+
+def print_summary(
+    guarantees: List[GuaranteeRecord],
+    settlement_receipt,
+    settlement_latency: Optional[float],
+):
     if not demo_results:
         presenter.note("No demo steps were executed.", style="yellow")
         return
 
     summary_table = Table(show_header=True, header_style="bold cyan")
     summary_table.add_column("Step")
-    summary_table.add_column("Status")
-    summary_table.add_column("Agent", style="magenta")
+    summary_table.add_column("Status", justify="center")
     summary_table.add_column("Latency (s)", justify="right")
-    summary_table.add_column("Tx / Notes", overflow="fold")
+    summary_table.add_column("Highlight", overflow="fold")
 
-    total_latency = 0.0
+    latencies = [result.latency for result in demo_results if result.latency is not None]
+    total_latency = sum(latencies)
+    measured_steps = len(latencies)
+    avg_latency = total_latency / measured_steps if measured_steps else 0.0
+    gas_samples = [result.gas_used for result in demo_results if result.gas_used]
+    total_gas_used = sum(gas_samples)
     success_count = 0
+    tx_entries = []
 
     for result in demo_results:
         latency_value = result.latency or 0.0
-        total_latency += latency_value
         status_lower = (result.status or "").lower()
         if "success" in status_lower:
             status_display = "[green]Success[/green]"
@@ -875,54 +926,102 @@ def print_summary(guarantees: List[GuaranteeRecord], settlement_receipt):
 
         latency_text = f"{latency_value:.2f}" if result.latency is not None else "—"
         info_parts = []
-        if result.tx_hash:
-            info_parts.append(result.tx_hash)
         if result.notes:
-            info_parts.append(result.notes)
+            info_parts.append(_shorten(result.notes))
         info = " | ".join(info_parts) if info_parts else "—"
 
         summary_table.add_row(
             result.name,
             status_display,
-            result.agent_name or "—",
             latency_text,
             info,
         )
 
-    if guarantees:
-        guarantee_table = Table(show_header=True, header_style="bold cyan")
-        guarantee_table.add_column("Run", justify="right")
-        guarantee_table.add_column("Amount", justify="right")
-        guarantee_table.add_column("Guarantee ID", overflow="fold")
-
-        for idx, guarantee in enumerate(guarantees, start=1):
-            amount = Decimal(guarantee.amount_wei) / Decimal(10**asset_decimals)
-            guarantee_table.add_row(
-                str(idx),
-                f"{amount:.6f} {asset_symbol}",
-                guarantee.guarantee_id,
+        if result.tx_hash:
+            tx_entries.append(
+                (
+                    result.name,
+                    result.tx_hash,
+                    result.gas_used,
+                    result.gas_cost_eth,
+                )
             )
 
-        settlement_hash = settlement_receipt.transactionHash.hex() if settlement_receipt else "—"
-        presenter.section(
-            "4MICA Settlement",
-            description="Guarantees aggregated and optional on-chain settlement details.",
-            highlights=[
-                SectionContent("Guarantees", str(len(guarantees))),
-                SectionContent("Settlement Tx", settlement_hash),
-            ],
-            extra=guarantee_table,
-        )
+    guarantee_table = None
+    guarantee_latencies = [g.total_latency for g in guarantees if g.total_latency is not None]
+    total_guarantee_latency = sum(guarantee_latencies)
+    avg_guarantee_latency = (
+        total_guarantee_latency / len(guarantee_latencies) if guarantee_latencies else 0.0
+    )
+    total_value_units = sum(g.amount_wei for g in guarantees)
+    aggregate_value = (
+        Decimal(total_value_units) / Decimal(10**asset_decimals) if total_value_units else Decimal("0")
+    )
+    avoided_transactions = max(len(guarantees) - 1, 0) if guarantees else 0
 
-    presenter.section(
-        "Demo Summary",
-        description="High-level view of each step executed during the 4MICA credit walkthrough.",
-        highlights=[
-            SectionContent("Steps Run", str(len(demo_results))),
-            SectionContent("Successful", f"{success_count}/{len(demo_results)}"),
+    if guarantees:
+        guarantee_table = Table(show_header=True, header_style="bold cyan")
+        guarantee_table.add_column("Credit Run", justify="left")
+        guarantee_table.add_column("Guarantee ID", overflow="fold")
+        guarantee_table.add_column("BLS Cycle (s)", justify="right")
+        guarantee_table.add_column("Amount", justify="right")
+
+        for guarantee in guarantees:
+            amount = Decimal(guarantee.amount_wei) / Decimal(10**asset_decimals)
+            cycle_text = f"{guarantee.total_latency:.2f}" if guarantee.total_latency is not None else "—"
+            guarantee_table.add_row(
+                guarantee.label,
+                guarantee.guarantee_id,
+                cycle_text,
+                f"{amount:.6f} {asset_symbol}",
+            )
+
+    extras = [summary_table]
+    if guarantee_table:
+        extras.append(guarantee_table)
+    extra_renderable = Group(*extras) if len(extras) > 1 else extras[0]
+
+    total_steps = len(demo_results)
+    highlight_items: List[SectionContent] = []
+    if guarantees:
+        highlight_items.append(SectionContent("Credit Runs", f"{len(guarantees)} BLS passes"))
+        highlight_items.append(SectionContent("On-chain Tx Avoided", str(avoided_transactions)))
+        highlight_items.append(SectionContent("Aggregate Value", f"{aggregate_value:.6f} {asset_symbol}"))
+        if guarantee_latencies:
+            highlight_items.append(
+                SectionContent("Avg Credit Cycle", f"{avg_guarantee_latency:.2f}s")
+            )
+            highlight_items.append(
+                SectionContent("Credit Latency Sum", f"{total_guarantee_latency:.2f}s")
+            )
+        if settlement_latency is not None:
+            highlight_items.append(
+                SectionContent("Settlement Finality", f"{settlement_latency:.2f}s")
+            )
+
+    highlight_items.extend(
+        [
+            SectionContent("Demo Steps", str(total_steps)),
+            SectionContent("Successful", f"{success_count}/{total_steps}"),
             SectionContent("Total Latency", f"{total_latency:.2f}s"),
-        ],
-        extra=summary_table,
+            SectionContent("Avg Step", f"{avg_latency:.2f}s"),
+            SectionContent("On-chain Tx", str(len(tx_entries))),
+            SectionContent("Total Gas Used", f"{total_gas_used:,}" if total_gas_used else "0"),
+        ]
+    )
+    presenter.section(
+        "4MICA Performance Snapshot",
+        description="Off-chain guarantees collapsed into a single on-chain settlement, highlighting speed and cost efficiency.",
+        highlights=highlight_items,
+        extra=extra_renderable,
+    )
+
+    console.print(
+        build_headline_panel(
+            total_latency,
+            avg_latency,
+            total_gas_used,
+        )
     )
 
 
@@ -977,7 +1076,7 @@ def demo_x402_credit_payment(sdk):
             bullets=[f"Unable to fetch operator parameters: {error}"],
             highlights=[SectionContent("Status", "[red]Aborted[/red]")],
         )
-        return
+        return [], None, None
 
     if asset_address != ZERO_ADDRESS:
         base_amount = Decimal(str(FOURMICA_AMOUNT_USDC))
@@ -986,8 +1085,8 @@ def demo_x402_credit_payment(sdk):
 
     amount_units = int(base_amount * Decimal(10**asset_decimals))
     guarantees: List[GuaranteeRecord] = []
-    run_summaries: List[tuple] = []
     settlement_receipt = None
+    settlement_elapsed: Optional[float] = None
     total_amount_units = 0
 
     tab_start_timestamp: Optional[int] = None
@@ -1022,29 +1121,27 @@ def demo_x402_credit_payment(sdk):
         tab_start_timestamp = None
 
     for run_idx in range(FOURMICA_PAYMENT_COUNT):
-        run_label = f"{run_idx + 1}/{FOURMICA_PAYMENT_COUNT}"
+        payment_label = f"Credit Payment {run_idx + 1}/{FOURMICA_PAYMENT_COUNT}"
+        wait_title = (
+            f"Executing 4MICA credit payment #{run_idx + 1} "
+            f"({base_amount:.6f} {asset_symbol})"
+        )
         try:
-            guarantee, used_timestamp = request_guarantee(
-                public_params,
-                tab_id_int,
-                req_id=run_idx,
-                amount_wei=amount_units,
-                fixed_timestamp=tab_start_timestamp,
-            )
+            with WaitBar(console, wait_title):
+                guarantee, used_timestamp = request_guarantee(
+                    public_params,
+                    tab_id_int,
+                    req_id=run_idx,
+                    amount_wei=amount_units,
+                    run_label=payment_label,
+                    fixed_timestamp=tab_start_timestamp,
+                )
             guarantees.append(guarantee)
             if tab_start_timestamp is None:
                 tab_start_timestamp = used_timestamp
             presenter.note(
-                f"🛡️ Guarantee {run_label} issued ({base_amount:.6f} {asset_symbol}).",
+                f"🛡️ {payment_label} approved ({base_amount:.6f} {asset_symbol}).",
                 style="green",
-            )
-            run_summaries.append(
-                (
-                    run_idx + 1,
-                    "[green]Issued[/green]",
-                    guarantee.execution_latency,
-                    guarantee.guarantee_id,
-                )
             )
         except RuntimeError as err:
             record_result(
@@ -1056,10 +1153,10 @@ def demo_x402_credit_payment(sdk):
                 agent_wallet=payer_address,
             )
             presenter.note(
-                f"❌ Guarantee {run_label} failed: {err}",
+                f"❌ {payment_label} failed: {err}",
                 style="red",
             )
-            return [], None
+            return [], None, settlement_elapsed
 
     if guarantees:
         total_amount_units = sum(g.amount_wei for g in guarantees)
@@ -1089,34 +1186,12 @@ def demo_x402_credit_payment(sdk):
                 agent_wallet=payer_address,
             )
             presenter.note(f"❌ Settlement failed: {err}", style="red")
-            return guarantees, None
+            return guarantees, None, settlement_elapsed
 
-    if run_summaries:
-        summary_table = Table(show_header=True, header_style="bold cyan")
-        summary_table.add_column("Run", justify="right")
-        summary_table.add_column("Status")
-        summary_table.add_column("Latency (s)", justify="right")
-        summary_table.add_column("Guarantee ID", overflow="fold")
-
-        for index, status, latency, gid in run_summaries:
-            latency_text = f"{latency:.2f}" if latency is not None else "—"
-            summary_table.add_row(str(index), status, latency_text, gid or "—")
-
-        settlement_hash = settlement_receipt.transactionHash.hex() if settlement_receipt else "—"
-        presenter.section(
-            "4MICA Guarantee Runs",
-            description="Proof-of-credit lifecycle summary.",
-            highlights=[
-                SectionContent("Guarantees", str(len(guarantees))),
-                SectionContent("Per Run", f"{base_amount:.6f} {asset_symbol}"),
-                SectionContent("Settlement Tx", settlement_hash),
-            ],
-            extra=summary_table,
-        )
-
+    aggregate_value = Decimal(total_amount_units) / Decimal(10**asset_decimals)
     notes = (
-        f"{len(guarantees)} guarantees · total "
-        f"{Decimal(total_amount_units) / Decimal(10**asset_decimals):.6f} {asset_symbol}"
+        f"{len(guarantees)} guarantees → 1 tx · "
+        f"{aggregate_value:.6f} {asset_symbol}"
     )
 
     record_result(
@@ -1130,7 +1205,7 @@ def demo_x402_credit_payment(sdk):
         agent_name="4MICA Payer",
         agent_wallet=payer_address,
     )
-    return guarantees, settlement_receipt
+    return guarantees, settlement_receipt, settlement_elapsed
 
 def main():
     try:
@@ -1158,9 +1233,9 @@ def main():
         demo_3_storage(sdk)
         demo_4_process_integrity()
 
-        guarantees, settlement_receipt = demo_x402_credit_payment(sdk)
+        guarantees, settlement_receipt, settlement_latency = demo_x402_credit_payment(sdk)
 
-        print_summary(guarantees, settlement_receipt)
+        print_summary(guarantees, settlement_receipt, settlement_latency)
 
     except KeyboardInterrupt:
         console.print("\n\n[yellow]Demo interrupted by user[/yellow]")

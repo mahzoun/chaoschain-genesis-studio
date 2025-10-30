@@ -62,6 +62,12 @@ class DemoStepResult:
 
 demo_results: List[DemoStepResult] = []
 
+def _shorten(text: str, limit: int = 72) -> str:
+    """Trim long strings for compact summary tables."""
+    if not text or len(text) <= limit:
+        return text or ""
+    return text[: limit - 1] + "…"
+
 REGISTER_AGENT = os.getenv("DEMO_REGISTER_AGENT", "false").strip().lower() == "true"
 
 
@@ -711,6 +717,32 @@ def demo_5_x402_payments():
         )
 
 
+def build_headline_panel(
+    total_latency: float,
+    avg_latency: float,
+    total_gas_used: int,
+) -> Panel:
+    """Generate a boardroom-ready performance recap."""
+    gas_used_text = f"{total_gas_used:,}" if total_gas_used else "0"
+    avg_latency_text = f"{avg_latency:.2f}s" if avg_latency else "—"
+
+    body = (
+        "[bold bright_white]Total Latency[/bold bright_white]\n"
+        f"[bold cyan]{total_latency:.2f}s[/bold cyan]\n\n"
+        "[bold bright_white]Avg Step Latency[/bold bright_white]\n"
+        f"[bold cyan]{avg_latency_text}[/bold cyan]\n\n"
+        "[bold bright_white]Total Gas Used[/bold bright_white]\n"
+        f"[bold cyan]{gas_used_text}[/bold cyan]"
+    )
+
+    return Panel.fit(
+        body,
+        title="⚡ Base Install Performance",
+        border_style="magenta",
+        padding=(1, 6),
+    )
+
+
 def print_summary():
     """Print demo summary."""
     if not demo_results:
@@ -719,17 +751,21 @@ def print_summary():
 
     summary_table = Table(show_header=True, header_style="bold cyan")
     summary_table.add_column("Step")
-    summary_table.add_column("Status")
-    summary_table.add_column("Agent", style="magenta")
+    summary_table.add_column("Status", justify="center")
     summary_table.add_column("Latency (s)", justify="right")
-    summary_table.add_column("Tx / Notes", overflow="fold")
+    summary_table.add_column("Highlight", overflow="fold")
 
-    total_latency = 0.0
+    latencies = [result.latency for result in demo_results if result.latency is not None]
+    total_latency = sum(latencies)
+    measured_steps = len(latencies)
+    avg_latency = total_latency / measured_steps if measured_steps else 0.0
+    gas_samples = [result.gas_used for result in demo_results if result.gas_used]
+    total_gas_used = sum(gas_samples)
     success_count = 0
+    tx_entries = []
 
     for result in demo_results:
         latency_value = result.latency or 0.0
-        total_latency += latency_value
         status_lower = (result.status or "").lower()
         if "success" in status_lower:
             status_display = "[green]Success[/green]"
@@ -742,30 +778,54 @@ def print_summary():
             status_display = result.status or "-"
 
         latency_text = f"{latency_value:.2f}" if result.latency is not None else "—"
-        note_parts = []
-        if result.tx_hash:
-            note_parts.append(result.tx_hash)
+        info_parts = []
         if result.notes:
-            note_parts.append(result.notes)
-        info = " | ".join(note_parts) if note_parts else "—"
+            info_parts.append(_shorten(result.notes))
+        info = " | ".join(info_parts) if info_parts else "—"
 
         summary_table.add_row(
             result.name,
             status_display,
-            result.agent_name or "—",
             latency_text,
             info,
         )
 
+        if result.tx_hash:
+            tx_entries.append(
+                (
+                    result.name,
+                    result.tx_hash,
+                    result.gas_used,
+                    result.gas_cost_eth,
+                )
+            )
+
+    extras = [summary_table]
+    extra_renderable = extras[0]
+
+    total_steps = len(demo_results)
+    highlight_items = [
+        SectionContent("Demo Steps", str(total_steps)),
+        SectionContent("Successful", f"{success_count}/{total_steps}"),
+        SectionContent("Total Latency", f"{total_latency:.2f}s"),
+        SectionContent("Avg Step", f"{avg_latency:.2f}s"),
+        SectionContent("On-chain Tx", str(len(tx_entries))),
+        SectionContent("Total Gas Used", f"{total_gas_used:,}" if total_gas_used else "0"),
+    ]
+
     presenter.section(
         "Demo Summary",
-        description="High-level view of each step executed during the Genesis Studio walkthrough.",
-        highlights=[
-            SectionContent("Steps Run", str(len(demo_results))),
-            SectionContent("Successful", f"{success_count}/{len(demo_results)}"),
-            SectionContent("Total Latency", f"{total_latency:.2f}s"),
-        ],
-        extra=summary_table,
+        description="Performance snapshot for the base Ethereum install run on Sepolia.",
+        highlights=highlight_items,
+        extra=extra_renderable,
+    )
+
+    console.print(
+        build_headline_panel(
+            total_latency,
+            avg_latency,
+            total_gas_used,
+        )
     )
 
 

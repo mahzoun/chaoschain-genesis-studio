@@ -28,7 +28,7 @@ from rich.text import Text
 class WaitBar:
     """Display a pulsing progress bar while long-running work completes."""
 
-    def __init__(self, console: Console, description: str, *, bar_width: int = 46):
+    def __init__(self, console: Console, description: str, *, bar_width: int = 68):
         self.console = console
         self.description = description
         self.bar_width = bar_width
@@ -155,4 +155,3 @@ class DemoNarrator:
     def note(self, message: str, *, style: str = "cyan") -> None:
         """Render a short, styled note outside of the numbered sections."""
         self.console.print(Text(message, style=style))
-
