@@ -47,7 +47,6 @@ from eth_account.messages import encode_typed_data
 from eth_utils import to_checksum_address
 from py_ecc.bls import G2Basic as bls
 from web3 import Web3
-from web3.types import TxReceipt
 from web3.exceptions import ABIFunctionNotFound
 from rich.console import Console, Group
 from rich.panel import Panel
@@ -271,24 +270,6 @@ def eth_balance(addr: str) -> Decimal:
     return Decimal(w3.from_wei(w3.eth.get_balance(addr), "ether"))
 
 
-def _build_base_tx(account) -> dict:
-    latest_block = w3.eth.get_block("latest")
-    base_fee = latest_block.get("baseFeePerGas") or w3.to_wei("1", "gwei")
-    priority_fee = w3.to_wei("2", "gwei")
-    return {
-        "from": account.address,
-        "nonce": w3.eth.get_transaction_count(account.address),
-        "gas": 300_000,
-        "maxPriorityFeePerGas": priority_fee,
-        "maxFeePerGas": base_fee + priority_fee,
-    }
-
-
-def _send_tx(account, tx_data: dict) -> TxReceipt:
-    signed = account.sign_transaction(tx_data)
-    tx_hash = w3.eth.send_raw_transaction(signed.raw_transaction)
-    return w3.eth.wait_for_transaction_receipt(tx_hash)
-
 
 def _erc20_decimals(token_contract, fallback: int = 6) -> int:
     try:
@@ -297,21 +278,6 @@ def _erc20_decimals(token_contract, fallback: int = 6) -> int:
         console.print("[yellow]⚠️ Token decimals() not available; using fallback[/yellow]")
         return fallback
 
-
-def record_payment(
-    private_key: str,
-    tab_id: int,
-    amount_wei: int,
-    asset: str = "0x0000000000000000000000000000000000000000",
-) -> TxReceipt:
-    account = w3.eth.account.from_key(private_key)
-    tx_data = _build_base_tx(account)
-    tx = core4mica_contract.functions.recordPayment(
-        tab_id,
-        Web3.to_checksum_address(asset),
-        amount_wei,
-    ).build_transaction(tx_data)
-    return _send_tx(account, tx)
 
 
 def rest_get(path: str) -> Dict:
@@ -851,15 +817,41 @@ def request_guarantee(
     )
 
 
-def settle_aggregate(total_amount_wei: int, tab_int: int):
-    with WaitBar(console, "Recording aggregate payment on-chain") as wait:
-        receipt = record_payment(
-            FOURMICA_PRIVATE_KEY,
-            tab_int,
-            total_amount_wei,
-            asset_address,
-        )
-    return receipt
+def settle_aggregate(total_amount_wei: int, tab_int: int, sdk, payer_agent: str):
+    from chaoschain_sdk.exceptions import PaymentError
+
+    payment_manager = getattr(sdk, "payment_manager", None)
+    if not payment_manager:
+        raise RuntimeError("ChaosChain payment manager unavailable for x402 settlement.")
+
+    settlement_amount = Decimal(total_amount_wei) / Decimal(10**asset_decimals)
+
+    manager_request = payment_manager.create_x402_payment_request(
+        from_agent=payer_agent,
+        to_agent=sdk.agent_name,
+        amount=float(settlement_amount),
+        currency=asset_symbol or "USDC",
+        service_description=f"4MICA settlement for tab {hex(tab_int)}",
+    )
+
+    try:
+        payment_proof = payment_manager.execute_x402_payment(manager_request)
+    except PaymentError as err:
+        raise RuntimeError(f"x402 settlement failed: {err}") from err
+    except Exception as err:
+        raise RuntimeError(f"Unexpected error during x402 settlement: {err}") from err
+
+    settlement_receipt = None
+    tx_hash = getattr(payment_proof, "transaction_hash", None)
+    if tx_hash:
+        try:
+            settlement_receipt = sdk.wallet_manager.w3.eth.get_transaction_receipt(tx_hash)
+        except Exception as receipt_error:
+            presenter.note(
+                f"⚠️ Could not fetch settlement receipt: {receipt_error}",
+                style="yellow",
+            )
+    return payment_proof, settlement_receipt
 
 
 def build_headline_panel(
@@ -868,15 +860,15 @@ def build_headline_panel(
     total_gas_used: int,
 ) -> Panel:
     """Generate a bold recap panel for executive audiences."""
-    gas_used_text = f"{total_gas_used:,}" if total_gas_used else "0"
     avg_latency_text = f"{avg_latency:.2f}s" if avg_latency else "—"
+    gas_used_text = f"{total_gas_used:,}" if total_gas_used else "0"
 
     body = (
-        "[bold bright_white]Total Latency[/bold bright_white]\n"
+        "[bold bright_white]Latency[/bold bright_white]\n"
         f"[bold cyan]{total_latency:.2f}s[/bold cyan]\n\n"
         "[bold bright_white]Avg Step Latency[/bold bright_white]\n"
         f"[bold cyan]{avg_latency_text}[/bold cyan]\n\n"
-        "[bold bright_white]Total Gas Used[/bold bright_white]\n"
+        "[bold bright_white]Gas Used[/bold bright_white]\n"
         f"[bold cyan]{gas_used_text}[/bold cyan]"
     )
     return Panel.fit(
@@ -905,7 +897,6 @@ def print_summary(
     latencies = [result.latency for result in demo_results if result.latency is not None]
     total_latency = sum(latencies)
     measured_steps = len(latencies)
-    avg_latency = total_latency / measured_steps if measured_steps else 0.0
     gas_samples = [result.gas_used for result in demo_results if result.gas_used]
     total_gas_used = sum(gas_samples)
     success_count = 0
@@ -958,6 +949,8 @@ def print_summary(
         Decimal(total_value_units) / Decimal(10**asset_decimals) if total_value_units else Decimal("0")
     )
     avoided_transactions = max(len(guarantees) - 1, 0) if guarantees else 0
+    payment_count = len(guarantees) if guarantees else max(FOURMICA_PAYMENT_COUNT, 1)
+    avg_latency_per_payment = total_latency / payment_count if payment_count else 0.0
 
     if guarantees:
         guarantee_table = Table(show_header=True, header_style="bold cyan")
@@ -996,17 +989,17 @@ def print_summary(
             )
         if settlement_latency is not None:
             highlight_items.append(
-                SectionContent("Settlement Finality", f"{settlement_latency:.2f}s")
-            )
+            SectionContent("Settlement Finality", f"{settlement_latency:.2f}s")
+        )
 
     highlight_items.extend(
         [
             SectionContent("Demo Steps", str(total_steps)),
             SectionContent("Successful", f"{success_count}/{total_steps}"),
-            SectionContent("Total Latency", f"{total_latency:.2f}s"),
-            SectionContent("Avg Step", f"{avg_latency:.2f}s"),
+            SectionContent("Latency", f"{total_latency:.2f}s"),
+            SectionContent("Avg Step", f"{avg_latency_per_payment:.2f}s"),
             SectionContent("On-chain Tx", str(len(tx_entries))),
-            SectionContent("Total Gas Used", f"{total_gas_used:,}" if total_gas_used else "0"),
+            SectionContent("Gas Used", f"{total_gas_used:,}" if total_gas_used else "0"),
         ]
     )
     presenter.section(
@@ -1019,7 +1012,7 @@ def print_summary(
     console.print(
         build_headline_panel(
             total_latency,
-            avg_latency,
+            avg_latency_per_payment,
             total_gas_used,
         )
     )
@@ -1039,6 +1032,11 @@ def demo_x402_credit_payment(sdk):
     description = (
         "Aggregate 4MICA guarantees into a single on-chain settlement using Coinbase x402 credit."
     )
+    payer_agent = (
+        os.environ.get("FOURMICA_X402_PAYER_AGENT")
+        or os.environ.get("X402_PAYER_AGENT")
+        or sdk.agent_name
+    )
     presenter.section(
         "x402 Credit Payment (4MICA)",
         description=description,
@@ -1050,12 +1048,18 @@ def demo_x402_credit_payment(sdk):
             SectionContent("Operator", f"[cyan]{FOURMICA_OPERATOR}[/cyan]"),
             SectionContent("Collateral Asset", asset_label),
             SectionContent("Payer", f"[green]{payer_address}[/green]"),
+            SectionContent("Settlement Agent", f"[green]{payer_agent}[/green]"),
             SectionContent("Recipient", f"[green]{recipient_address}[/green]"),
             SectionContent("Runs", str(FOURMICA_PAYMENT_COUNT)),
         ],
     )
 
     step_start = time.perf_counter()
+    wallet_manager = getattr(sdk, "wallet_manager", None)
+    try:
+        payer_agent_wallet = wallet_manager.get_wallet_address(payer_agent) if wallet_manager else None
+    except Exception:
+        payer_agent_wallet = None
 
     try:
         with WaitBar(console, "Fetching public parameters"):
@@ -1067,8 +1071,8 @@ def demo_x402_credit_payment(sdk):
             "Failed",
             latency=time.perf_counter() - step_start,
             notes=str(error),
-            agent_name="4MICA Payer",
-            agent_wallet=payer_address,
+            agent_name=payer_agent,
+            agent_wallet=payer_agent_wallet or payer_address,
         )
         presenter.section(
             "x402 Credit Payment (4MICA)",
@@ -1149,8 +1153,8 @@ def demo_x402_credit_payment(sdk):
                 "Failed",
                 latency=time.perf_counter() - step_start,
                 notes=str(err),
-                agent_name="4MICA Payer",
-                agent_wallet=payer_address,
+                agent_name=payer_agent,
+                agent_wallet=payer_agent_wallet or payer_address,
             )
             presenter.note(
                 f"❌ {payment_label} failed: {err}",
@@ -1158,19 +1162,25 @@ def demo_x402_credit_payment(sdk):
             )
             return [], None, settlement_elapsed
 
+    payment_proof = None
+
     if guarantees:
         total_amount_units = sum(g.amount_wei for g in guarantees)
+        aggregate_value = Decimal(total_amount_units) / Decimal(10**asset_decimals)
         presenter.note(
             f"Aggregating {len(guarantees)} guarantees into settlement totaling "
-            f"{Decimal(total_amount_units) / Decimal(10**asset_decimals):.6f} {asset_symbol}.",
+            f"{aggregate_value:.6f} {asset_symbol}.",
             style="cyan",
         )
-        settlement_prompt = (
-            f"Recording aggregate payment on-chain ({Decimal(total_amount_units) / Decimal(10**asset_decimals):.6f} {asset_symbol})"
-        )
+        settlement_prompt = f"Executing x402 settlement ({aggregate_value:.6f} {asset_symbol})"
         try:
             with WaitBar(console, settlement_prompt) as wait:
-                settlement_receipt = settle_aggregate(total_amount_units, guarantees[0].tab_id)
+                payment_proof, settlement_receipt = settle_aggregate(
+                    total_amount_units,
+                    guarantees[0].tab_id,
+                    sdk,
+                    payer_agent,
+                )
             settlement_elapsed = wait.elapsed or 0.0
             presenter.note(
                 f"✅ Settlement confirmed in {settlement_elapsed:.2f}s.",
@@ -1182,28 +1192,45 @@ def demo_x402_credit_payment(sdk):
                 "Failed",
                 latency=time.perf_counter() - step_start,
                 notes=f"Settlement error: {err}",
-                agent_name="4MICA Payer",
-                agent_wallet=payer_address,
+                agent_name=payer_agent,
+                agent_wallet=payer_agent_wallet or payer_address,
             )
             presenter.note(f"❌ Settlement failed: {err}", style="red")
             return guarantees, None, settlement_elapsed
+    else:
+        aggregate_value = Decimal(0)
 
-    aggregate_value = Decimal(total_amount_units) / Decimal(10**asset_decimals)
-    notes = (
-        f"{len(guarantees)} guarantees → 1 tx · "
-        f"{aggregate_value:.6f} {asset_symbol}"
-    )
+    notes_parts = [
+        f"{len(guarantees)} guarantees → 1 tx · {aggregate_value:.6f} {asset_symbol}"
+    ]
+    settlement_tx_hash = None
+    if guarantees and payment_proof:
+        tx_attr = getattr(payment_proof, "transaction_hash", None)
+        if tx_attr is not None:
+            settlement_tx_hash = tx_attr.hex() if hasattr(tx_attr, "hex") else str(tx_attr)
+        receipt_data = getattr(payment_proof, "receipt_data", {}) or {}
+        protocol_fee = receipt_data.get("protocol_fee")
+        fee_tx = receipt_data.get("protocol_fee_tx")
+        if protocol_fee is not None:
+            if isinstance(protocol_fee, (int, float, Decimal)):
+                notes_parts.append(f"Protocol fee: {Decimal(str(protocol_fee)):.6f} {asset_symbol}")
+            else:
+                notes_parts.append(f"Protocol fee: {protocol_fee}")
+        if fee_tx:
+            notes_parts.append(f"Fee tx: {fee_tx}")
+    notes = " | ".join(notes_parts)
 
     record_result(
         "x402 Credit Payment",
         "Success",
         latency=time.perf_counter() - step_start,
-        tx_hash=settlement_receipt.transactionHash.hex() if settlement_receipt else None,
+        tx_hash=settlement_tx_hash
+        or (settlement_receipt.transactionHash.hex() if settlement_receipt else None),
         receipt=settlement_receipt,
-        w3=w3,
+        w3=wallet_manager.w3 if wallet_manager else w3,
         notes=notes,
-        agent_name="4MICA Payer",
-        agent_wallet=payer_address,
+        agent_name=payer_agent,
+        agent_wallet=payer_agent_wallet or payer_address,
     )
     return guarantees, settlement_receipt, settlement_elapsed
 

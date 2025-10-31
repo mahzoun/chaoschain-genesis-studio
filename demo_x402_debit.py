@@ -727,17 +727,17 @@ def build_headline_panel(
     avg_latency_text = f"{avg_latency:.2f}s" if avg_latency else "—"
 
     body = (
-        "[bold bright_white]Total Latency[/bold bright_white]\n"
+        "[bold bright_white]Latency[/bold bright_white]\n"
         f"[bold cyan]{total_latency:.2f}s[/bold cyan]\n\n"
         "[bold bright_white]Avg Step Latency[/bold bright_white]\n"
         f"[bold cyan]{avg_latency_text}[/bold cyan]\n\n"
-        "[bold bright_white]Total Gas Used[/bold bright_white]\n"
+        "[bold bright_white]Gas Used[/bold bright_white]\n"
         f"[bold cyan]{gas_used_text}[/bold cyan]"
     )
 
     return Panel.fit(
         body,
-        title="⚡ Base Install Performance",
+        title="⚡ X402 on ETH Sepolia Performance",
         border_style="magenta",
         padding=(1, 6),
     )
@@ -757,12 +757,11 @@ def print_summary():
 
     latencies = [result.latency for result in demo_results if result.latency is not None]
     total_latency = sum(latencies)
-    measured_steps = len(latencies)
-    avg_latency = total_latency / measured_steps if measured_steps else 0.0
     gas_samples = [result.gas_used for result in demo_results if result.gas_used]
     total_gas_used = sum(gas_samples)
     success_count = 0
     tx_entries = []
+    payment_result_count = 0
 
     for result in demo_results:
         latency_value = result.latency or 0.0
@@ -799,18 +798,28 @@ def print_summary():
                     result.gas_cost_eth,
                 )
             )
+        if result.name.lower().startswith("x402 payment execution"):
+            payment_result_count += 1
 
     extras = [summary_table]
     extra_renderable = extras[0]
 
     total_steps = len(demo_results)
+    configured_runs = os.getenv("X402_PAYMENT_COUNT")
+    try:
+        configured_runs_value = int(configured_runs) if configured_runs else 0
+    except ValueError:
+        configured_runs_value = 0
+    payment_count = payment_result_count or configured_runs_value or 1
+    avg_latency_per_payment = total_latency / payment_count if payment_count else 0.0
+
     highlight_items = [
         SectionContent("Demo Steps", str(total_steps)),
         SectionContent("Successful", f"{success_count}/{total_steps}"),
-        SectionContent("Total Latency", f"{total_latency:.2f}s"),
-        SectionContent("Avg Step", f"{avg_latency:.2f}s"),
+        SectionContent("Latency", f"{total_latency:.2f}s"),
+        SectionContent("Avg Step", f"{avg_latency_per_payment:.2f}s"),
         SectionContent("On-chain Tx", str(len(tx_entries))),
-        SectionContent("Total Gas Used", f"{total_gas_used:,}" if total_gas_used else "0"),
+        SectionContent("Gas Used", f"{total_gas_used:,}" if total_gas_used else "0"),
     ]
 
     presenter.section(
@@ -823,7 +832,7 @@ def print_summary():
     console.print(
         build_headline_panel(
             total_latency,
-            avg_latency,
+            avg_latency_per_payment,
             total_gas_used,
         )
     )
